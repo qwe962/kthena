@@ -34,6 +34,90 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 )
 
+func TestCopyResponseHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name     string
+		upstream http.Header
+		existing http.Header
+		want     http.Header
+	}{
+		{
+			name:     "single value",
+			upstream: http.Header{"Content-Type": {"application/json"}},
+			want:     http.Header{"Content-Type": {"application/json"}},
+		},
+		{
+			name: "multiple values",
+			upstream: http.Header{
+				"Set-Cookie":       {"a=1; Path=/", "b=2; Path=/"},
+				"Www-Authenticate": {`Bearer realm="model"`, `Basic realm="model"`},
+			},
+			want: http.Header{
+				"Set-Cookie":       {"a=1; Path=/", "b=2; Path=/"},
+				"Www-Authenticate": {`Bearer realm="model"`, `Basic realm="model"`},
+			},
+		},
+		{
+			name:     "replace existing values and preserve unrelated headers",
+			upstream: http.Header{"Set-Cookie": {"a=1", "b=2"}},
+			existing: http.Header{"Set-Cookie": {"old=1"}, "X-Request-Id": {"request-1"}},
+			want:     http.Header{"Set-Cookie": {"a=1", "b=2"}, "X-Request-Id": {"request-1"}},
+		},
+		{
+			name:     "empty upstream preserves existing headers",
+			existing: http.Header{"X-Request-Id": {"request-1"}},
+			want:     http.Header{"X-Request-Id": {"request-1"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			for key, values := range tt.existing {
+				w.Header()[key] = append([]string(nil), values...)
+			}
+			c, _ := gin.CreateTestContext(w)
+			copyResponseHeaders(c, tt.upstream)
+			assert.Equal(t, tt.want, w.Header())
+
+			for key, values := range tt.upstream {
+				if len(values) > 0 {
+					w.Header()[key][0] = "changed downstream"
+					assert.Equal(t, tt.want[key], values, "copied values must be independent of upstream headers")
+				}
+			}
+		})
+	}
+}
+
+func TestDecoderProxyPreservesMultiValueHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "a=1; Path=/")
+		w.Header().Add("Set-Cookie", "b=2; Path=/")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, path, nil)
+			req, err := http.NewRequest(http.MethodPost, server.URL+path, nil)
+			require.NoError(t, err)
+
+			_, err = decoderProxy(c, req, 0, http.DefaultTransport)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"a=1; Path=/", "b=2; Path=/"}, w.Header().Values("Set-Cookie"))
+			assert.Equal(t, `{}`, w.Body.String())
+		})
+	}
+}
+
 func TestIsTokenUsageEnabled(t *testing.T) {
 	tests := []struct {
 		name         string

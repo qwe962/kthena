@@ -25,6 +25,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -312,9 +313,7 @@ func originalRequestPath(c *gin.Context, req *http.Request) string {
 // copyResponseHeaders copies all upstream response headers onto the client response.
 func copyResponseHeaders(c *gin.Context, headers http.Header) {
 	for k, vv := range headers {
-		for _, v := range vv {
-			c.Header(k, v)
-		}
+		c.Writer.Header()[k] = slices.Clone(vv)
 	}
 }
 
